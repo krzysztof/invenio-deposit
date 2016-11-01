@@ -64,8 +64,9 @@ from invenio_records_rest.utils import PIDConverter
 from invenio_records_ui import InvenioRecordsUI
 from invenio_search import InvenioSearch, current_search, current_search_client
 from invenio_search_ui import InvenioSearchUI
-from six import BytesIO
+from six import BytesIO, get_method_self
 from sqlalchemy_utils.functions import create_database, database_exists
+from werkzeug.wsgi import DispatcherMiddleware
 
 from invenio_deposit import InvenioDeposit, InvenioDepositREST
 from invenio_deposit.api import Deposit
@@ -76,58 +77,74 @@ from invenio_deposit.scopes import write_scope
 def app():
     """Flask application fixture."""
     instance_path = tempfile.mkdtemp()
-    app_ = Flask(__name__, instance_path=instance_path)
-    app_.config.update(
-        CELERY_ALWAYS_EAGER=True,
-        CELERY_CACHE_BACKEND='memory',
-        CELERY_EAGER_PROPAGATES_EXCEPTIONS=True,
-        CELERY_RESULT_BACKEND='cache',
-        JSONSCHEMAS_URL_SCHEME='http',
-        SECRET_KEY='CHANGE_ME',
-        SECURITY_PASSWORD_SALT='CHANGE_ME_ALSO',
-        SQLALCHEMY_DATABASE_URI=os.environ.get(
-            'SQLALCHEMY_DATABASE_URI', 'sqlite:///test.db'),
-        SQLALCHEMY_TRACK_MODIFICATIONS=True,
-        SQLALCHEMY_ECHO=False,
-        TESTING=True,
-        WTF_CSRF_ENABLED=False,
-        DEPOSIT_SEARCH_API='/api/search',
-        SECURITY_PASSWORD_HASH='plaintext',
-        SECURITY_PASSWORD_SCHEMES=['plaintext'],
-        SECURITY_DEPRECATED_PASSWORD_SCHEMES=[],
-        OAUTHLIB_INSECURE_TRANSPORT=True,
-        OAUTH2_CACHE_TYPE='simple',
-    )
-    app_.url_map.converters['pid'] = PIDConverter
-    Babel(app_)
-    FlaskCeleryExt(app_)
-    InvenioDB(app_)
-    Breadcrumbs(app_)
-    InvenioAccounts(app_)
-    InvenioAccess(app_)
-    app_.register_blueprint(accounts_blueprint)
-    InvenioAssets(app_)
-    InvenioJSONSchemas(app_)
-    InvenioSearch(app_)
-    InvenioRecords(app_)
-    app_.url_map.converters['pid'] = PIDConverter
-    InvenioRecordsREST(app_)
-    InvenioPIDStore(app_)
-    InvenioIndexer(app_)
-    InvenioDeposit(app_)
-    InvenioSearchUI(app_)
-    InvenioRecordsUI(app_)
-    InvenioFilesREST(app_)
-    OAuth2Provider(app_)
-    InvenioOAuth2Server(app_)
-    InvenioOAuth2ServerREST(app_)
-    app_.register_blueprint(oauth2server_settings_blueprint)
-    InvenioDepositREST(app_)
 
-    with app_.app_context():
-        yield app_
+    def init_app(app_):
+        app_.config.update(
+            CELERY_ALWAYS_EAGER=True,
+            CELERY_CACHE_BACKEND='memory',
+            CELERY_EAGER_PROPAGATES_EXCEPTIONS=True,
+            CELERY_RESULT_BACKEND='cache',
+            JSONSCHEMAS_URL_SCHEME='http',
+            SECRET_KEY='CHANGE_ME',
+            SECURITY_PASSWORD_SALT='CHANGE_ME_ALSO',
+            SQLALCHEMY_DATABASE_URI=os.environ.get(
+                'SQLALCHEMY_DATABASE_URI', 'sqlite:///test.db'),
+            SQLALCHEMY_TRACK_MODIFICATIONS=True,
+            SQLALCHEMY_ECHO=False,
+            TESTING=True,
+            WTF_CSRF_ENABLED=False,
+            DEPOSIT_SEARCH_API='/api/search',
+            SECURITY_PASSWORD_HASH='plaintext',
+            SECURITY_PASSWORD_SCHEMES=['plaintext'],
+            SECURITY_DEPRECATED_PASSWORD_SCHEMES=[],
+            OAUTHLIB_INSECURE_TRANSPORT=True,
+            OAUTH2_CACHE_TYPE='simple',
+        )
+        app_.url_map.converters['pid'] = PIDConverter
+        Babel(app_)
+        FlaskCeleryExt(app_)
+        InvenioDB(app_)
+        Breadcrumbs(app_)
+        InvenioAccounts(app_)
+        InvenioAccess(app_)
+        app_.register_blueprint(accounts_blueprint)
+        InvenioAssets(app_)
+        InvenioJSONSchemas(app_)
+        InvenioSearch(app_)
+        InvenioRecords(app_)
+        app_.url_map.converters['pid'] = PIDConverter
+        InvenioPIDStore(app_)
+        InvenioIndexer(app_)
+        InvenioSearchUI(app_)
+        InvenioRecordsUI(app_)
+        OAuth2Provider(app_)
+        InvenioOAuth2Server(app_)
+        app_.register_blueprint(oauth2server_settings_blueprint)
+
+    api_app = Flask('testapiapp', instance_path=instance_path)
+    init_app(api_app)
+    InvenioRecordsREST(api_app)
+    InvenioDepositREST(api_app)
+    InvenioOAuth2ServerREST(api_app)
+    InvenioFilesREST(api_app)
+
+    app = Flask('testapp', instance_path=instance_path)
+    init_app(app)
+    InvenioDeposit(app)
+    app.wsgi_app = DispatcherMiddleware(app.wsgi_app, {
+        '/api': api_app.wsgi_app
+    })
+
+    with app.app_context():
+        yield app
 
     shutil.rmtree(instance_path)
+
+
+@pytest.yield_fixture()
+def api_app(app):
+    """Retrieve the REST API application."""
+    return get_method_self(app.wsgi_app.mounts['/api'])
 
 
 @pytest.yield_fixture()
@@ -226,7 +243,7 @@ def db(app):
 
 
 @pytest.fixture()
-def fake_schemas(app, es, tmpdir):
+def fake_schemas(app, api_app, es, tmpdir):
     """Fake schema."""
     schemas = tmpdir.mkdir('schemas')
     empty_schema = '{"title": "Empty"}'
@@ -240,6 +257,8 @@ def fake_schemas(app, es, tmpdir):
         schema.write(empty_schema)
 
     app.extensions['invenio-jsonschemas'].register_schemas_dir(schemas.strpath)
+    api_app.extensions['invenio-jsonschemas'].register_schemas_dir(
+        schemas.strpath)
 
 
 @pytest.yield_fixture()
